@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import File
+from django.contrib.auth.models import User
 
 
 class FileSerializer(serializers.ModelSerializer):
@@ -24,3 +25,18 @@ class FileSerializer(serializers.ModelSerializer):
         instance.analysis_result = validated_data.get('analysis_result', instance.analysis_result)
         instance.save()
         return instance
+
+
+class UploadFileSerializer(serializers.Serializer):
+    file = serializers.FileField(required=False)
+    url = serializers.URLField(required=False)
+    name = serializers.CharField(max_length=255)
+    speakers = serializers.IntegerField()
+    language = serializers.CharField(max_length=100)
+    analyze_text = serializers.BooleanField(required=False, default=False)
+
+
+class UserInfoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['email']

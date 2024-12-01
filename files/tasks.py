@@ -2,7 +2,8 @@ import os
 from celery import shared_task
 import requests
 import moviepy.editor as mp
-from .config import minio_client
+
+from config.settings import minio_client
 from .models import File
 import logging
 import tempfile
@@ -11,12 +12,18 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-@shared_task
-def process_file(file_id, file_path, analyze_text):
+@shared_task(bind=True)
+def uploading_and_processing_file_text(self, file_id, file_path, analyze_text):
+    logger.info(f"Starting process_file task for file ID: {file_id}")
     try:
         file_instance = File.objects.get(id=file_id)
         file_instance.status = 'processing'
         file_instance.save()
+
+        # Проверка существования файла перед началом обработки
+        if not File.objects.filter(id=file_id).exists():
+            logger.info(f"File {file_id} has been deleted. Stopping task.")
+            return
 
         # Скачиваем файл из MinIO во временную директорию
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
@@ -26,6 +33,12 @@ def process_file(file_id, file_path, analyze_text):
                 temp_file.name
             )
             temp_file_path = temp_file.name
+
+        # Проверка существования файла перед обработкой видео
+        if not File.objects.filter(id=file_id).exists():
+            logger.info(f"File {file_id} has been deleted. Stopping task.")
+            os.remove(temp_file_path)
+            return
 
         # Обработка видеофайла
         clip = mp.VideoFileClip(temp_file_path)
@@ -40,6 +53,13 @@ def process_file(file_id, file_path, analyze_text):
         with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio_file:
             temp_audio_path = temp_audio_file.name
             clip.audio.write_audiofile(temp_audio_path, codec='pcm_s16le')
+
+        # Проверка существования файла перед отправкой на транскрипцию
+        if not File.objects.filter(id=file_id).exists():
+            logger.info(f"File {file_id} has been deleted. Stopping task.")
+            os.remove(temp_file_path)
+            os.remove(temp_audio_path)
+            return
 
         with open(temp_audio_path, 'rb') as audio_file:
             audio_bytes = io.BytesIO(audio_file.read())
@@ -71,6 +91,8 @@ def process_file(file_id, file_path, analyze_text):
         # Удаление временного файла
         os.remove(temp_file_path)
         os.remove(temp_audio_path)
-
+        logger.info(f"Finished process_file task for file ID: {file_id}")
     except Exception as e:
+        file_instance.status = 'error'
         logger.error(f"Error processing file: {e}")
+        file_instance.save()

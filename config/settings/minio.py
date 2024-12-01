@@ -1,6 +1,13 @@
 from config.settings import logging
 from config.settings.env import env
 from minio import Minio
+import environ
+
+# Инициализация environ
+env = environ.Env()
+
+# Чтение переменных из .env файла
+environ.Env.read_env()
 
 logger = logging.getLogger(__name__)
 

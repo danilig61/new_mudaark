@@ -25,49 +25,43 @@ services:
   db:
     image: postgres:latest
     environment:
-      POSTGRES_DB: config
-      POSTGRES_USER: config
-      POSTGRES_PASSWORD: config
+      POSTGRES_DB: mudaark
+      POSTGRES_USER: mudaark
+      POSTGRES_PASSWORD: mudaark
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - mudaark_network
 
   web:
-    build: .
-    command: python manage.py runserver 0.0.0.0:8000
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: bash start.sh
     volumes:
-      - .:/code
+      - .:/app
     ports:
       - "8000:8000"
     depends_on:
       - db
       - redis
-    environment:
-      - SECRET_KEY=django-insecure-afe7j%5h*(iph75synbd=_xjx#8ow2_c1%1mbt4@zww%o#@gft
-      - DEBUG=True
-      - DJANGO_SETTINGS_MODULE=config.settings
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - DATABASE_URL=postgres://config:config@db:5432/config
-      - AWS_ACCESS_KEY_ID=minioadmin
-      - AWS_SECRET_ACCESS_KEY=minioadmin
-      - AWS_STORAGE_BUCKET_NAME=config
-      - AWS_S3_ENDPOINT_URL=http://localhost:9000
+    env_file:
+      - .env
     networks:
       - mudaark_network
 
   celery:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     command: celery -A config worker --loglevel=info -P eventlet
     volumes:
-      - .:/code
+      - .:/app
     depends_on:
       - redis
       - web
-    environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file:
+      - .env
     networks:
       - mudaark_network
 

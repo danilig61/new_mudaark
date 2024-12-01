@@ -1,4 +1,11 @@
 from config.settings.env import env
+import environ
+
+# Инициализация environ
+env = environ.Env()
+
+# Чтение переменных из .env файла
+environ.Env.read_env()
 
 CELERY_BROKER_URL = env.str('CELERY_BROKER_URL')
 CELERY_RESULT_BACKEND = env.str('CELERY_RESULT_BACKEND')

@@ -1,10 +1,19 @@
-FROM python:3.10-slim
+FROM python:3.11-slim-buster as builder
 
-WORKDIR /code
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV PATH=$PATH:/root/.local/bin
 
-COPY requirements.txt /code/
-RUN pip install -r requirements.txt
+RUN apt update -y && apt install libmagic1 -y
 
-COPY . /code/
+WORKDIR /app
 
-CMD ["celery", "-A", "mudaark", "worker", "--loglevel=info"]
+COPY requirements.txt .
+RUN python -m pip install --no-cache -r requirements.txt
+
+COPY .env .
+COPY start.sh .
+RUN chmod +x start.sh
+COPY config .
+
+CMD ["bash", "start.sh"]

@@ -1,17 +1,23 @@
+import logging
+import random
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework import status, viewsets
+from drf_yasg.utils import swagger_auto_schema
+from rest_framework_simplejwt.tokens import RefreshToken
+from social_django.utils import load_backend, load_strategy
+from .serializers import UserSerializer, LoginSerializer, SetPasswordSerializer, VerifyEmailSerializer, \
+    RegisterSerializer, ResendVerificationCodeSerializer
+from .models import UserProfile
+from .tasks import send_verification_email
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status, viewsets
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
-from django.contrib.auth import authenticate, login, logout
-from django.contrib.auth.models import User
-from .serializers import UserSerializer
-from .models import UserProfile
-from .forms import RegisterForm
-from .tasks import send_verification_email
-import secrets
-from django.shortcuts import render
+from django.contrib.auth import login
+
+logger = logging.getLogger(__name__)
+
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
@@ -23,28 +29,41 @@ class LoginAPIView(APIView):
 
     @swagger_auto_schema(
         operation_description="Login a user with email and password",
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            properties={
-                'email': openapi.Schema(type=openapi.TYPE_STRING, description='User email'),
-                'password': openapi.Schema(type=openapi.TYPE_STRING, description='User password'),
-            },
-            required=['email', 'password'],
-        ),
+        request_body=LoginSerializer,
         responses={
             200: "Login successful",
             400: "Invalid credentials",
+            500: "Internal Server Error",
         },
     )
     def post(self, request):
-        email = request.data.get('email')
-        password = request.data.get('password')
-        user = authenticate(request, username=email, password=password)
-        if user is not None:
-            login(request, user)
-            return Response({'message': 'Login successful'}, status=status.HTTP_200_OK)
-        else:
-            return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
+        logger.info("Starting LoginAPIView post method")
+        serializer = LoginSerializer(data=request.data)
+        if serializer.is_valid():
+            email = serializer.validated_data['email']
+            password = serializer.validated_data['password']
+            logger.info(f"Login attempt with email: {email}")
+            user = authenticate(request, username=email, password=password)
+            if user is not None:
+                refresh = RefreshToken.for_user(user)
+                logger.info(f"Login successful for user: {email}")
+                return Response({
+                    'status_code': status.HTTP_200_OK,
+                    'message': 'Login successful',
+                    'refresh': str(refresh),
+                    'access': str(refresh.access_token),
+                }, status=status.HTTP_200_OK)
+            else:
+                logger.warning(f"Invalid credentials for email: {email}")
+                return Response({
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                    'error': 'Invalid credentials',
+                }, status=status.HTTP_400_BAD_REQUEST)
+        logger.error(f"Validation errors: {serializer.errors}")
+        return Response({
+            'status_code': status.HTTP_400_BAD_REQUEST,
+            'errors': serializer.errors,
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class LogoutAPIView(APIView):
@@ -52,11 +71,45 @@ class LogoutAPIView(APIView):
 
     @swagger_auto_schema(
         operation_description="Logout the current user",
-        responses={200: "Logout successful"},
+        request_body=LoginSerializer,
+        responses={200: "Logout successful", 401: "Unauthorized", 500: "Internal Server Error"},
     )
     def post(self, request):
-        logout(request)
-        return Response({'message': 'Logout successful'}, status=status.HTTP_200_OK)
+        try:
+            logger.info("Starting LogoutAPIView post method")
+            refresh_token = request.data.get("refresh")
+            if refresh_token:
+                try:
+                    token = RefreshToken(refresh_token)
+                    token.blacklist()
+                    logger.info(f"Logout successful for user: {request.user.email}")
+                    return Response({
+                        'status_code': status.HTTP_200_OK,
+                        'message': 'Logout successful',
+                    }, status=status.HTTP_200_OK)
+                except Exception as e:
+                    logger.error(f"Error during logout: {e}")
+                    return Response({
+                        'status_code': status.HTTP_400_BAD_REQUEST,
+                        'error': 'Invalid refresh token',
+                    }, status=status.HTTP_400_BAD_REQUEST)
+            logger.error("Refresh token is required")
+            return Response({
+                'status_code': status.HTTP_400_BAD_REQUEST,
+                'error': 'Refresh token is required',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except AuthenticationFailed as e:
+            logger.error(f"Authentication failed: {e}")
+            return Response({
+                'status_code': status.HTTP_401_UNAUTHORIZED,
+                'error': 'Unauthorized',
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        except Exception as e:
+            logger.error(f"Internal Server Error: {e}")
+            return Response({
+                'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR,
+                'error': 'Internal Server Error',
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class RegisterAPIView(APIView):
@@ -64,85 +117,135 @@ class RegisterAPIView(APIView):
 
     @swagger_auto_schema(
         operation_description="Register a new user",
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            properties={
-                'email': openapi.Schema(type=openapi.TYPE_STRING, description='User email'),
-            },
-            required=['email'],
-        ),
+        request_body=RegisterSerializer,
         responses={
             200: "Verification email sent",
             400: "User with this email already exists or invalid data",
+            500: "Internal Server Error",
         },
     )
     def post(self, request):
-        form = RegisterForm(request.data)
-        if form.is_valid():
-            email = form.cleaned_data['email']
+        logger.info("Starting RegisterAPIView post method")
+        serializer = RegisterSerializer(data=request.data)
+        if serializer.is_valid():
+            email = serializer.validated_data['email']
             if User.objects.filter(email=email).exists():
-                return Response({'error': 'User with this email already exists'}, status=status.HTTP_400_BAD_REQUEST)
-            confirmation_code = secrets.token_hex(3)
-            request.session['confirmation_code'] = confirmation_code
-            request.session['email'] = email
+                logger.warning(f"User with email {email} already exists")
+                return Response({
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                    'error': 'User with this email already exists',
+                }, status=status.HTTP_400_BAD_REQUEST)
+            user = serializer.save()
+            confirmation_code = str(random.randint(100000, 999999))  # Generate a 6-digit numeric code
+            user_profile, created = UserProfile.objects.get_or_create(user=user)
+            user_profile.verification_code = confirmation_code
+            user_profile.save()
             send_verification_email.delay(email, confirmation_code)
-            return Response({'message': 'Verification email sent'}, status=status.HTTP_200_OK)
-        return Response(form.errors, status=status.HTTP_400_BAD_REQUEST)
+            logger.info(f"Verification email sent to: {email}")
+            return Response({
+                'status_code': status.HTTP_200_OK,
+                'message': 'Verification email sent',
+            }, status=status.HTTP_200_OK)
+        logger.error(f"Validation errors: {serializer.errors}")
+        return Response({
+            'status_code': status.HTTP_400_BAD_REQUEST,
+            'errors': serializer.errors,
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class VerifyEmailAPIView(APIView):
     permission_classes = [AllowAny]
 
     @swagger_auto_schema(
-        operation_description="Verify the email with a confirmation code",
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            properties={
-                'code': openapi.Schema(type=openapi.TYPE_STRING, description='Confirmation code'),
-            },
-            required=['code'],
-        ),
+        operation_description="Verify email with confirmation code",
+        request_body=VerifyEmailSerializer,
         responses={
             200: "Email verified successfully",
             400: "Invalid confirmation code",
+            500: "Internal Server Error",
         },
     )
     def post(self, request):
-        code = request.data.get('code')
-        if code == request.session.get('confirmation_code'):
-            return Response({'message': 'Email verified successfully'}, status=status.HTTP_200_OK)
-        else:
-            return Response({'error': 'Invalid confirmation code'}, status=status.HTTP_400_BAD_REQUEST)
+        logger.info("Starting VerifyEmailAPIView post method")
+        serializer = VerifyEmailSerializer(data=request.data)
+        if serializer.is_valid():
+            code = serializer.validated_data['code']
+            try:
+                user_profile = UserProfile.objects.get(verification_code=code)
+                user = user_profile.user
+                user.is_active = True
+                user.save()
+                user_profile.verification_code = None  # Clear the verification code
+                user_profile.save()
+                logger.info(f"Email verified successfully for user: {user.email}")
+                return Response({
+                    'status_code': status.HTTP_200_OK,
+                    'message': 'Email verified successfully',
+                }, status=status.HTTP_200_OK)
+            except UserProfile.DoesNotExist:
+                logger.warning(f"Invalid confirmation code: {code}")
+                return Response({
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                    'error': 'Invalid confirmation code',
+                }, status=status.HTTP_400_BAD_REQUEST)
+        logger.error(f"Validation errors: {serializer.errors}")
+        return Response({
+            'status_code': status.HTTP_400_BAD_REQUEST,
+            'errors': serializer.errors,
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class SetPasswordAPIView(APIView):
     permission_classes = [AllowAny]
 
     @swagger_auto_schema(
-        operation_description="Set a password for the user",
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            properties={
-                'password': openapi.Schema(type=openapi.TYPE_STRING, description='User password'),
-                'confirm_password': openapi.Schema(type=openapi.TYPE_STRING, description='Confirm password'),
-            },
-            required=['password', 'confirm_password'],
-        ),
+        operation_description="Set password for the user",
+        request_body=SetPasswordSerializer,
         responses={
             200: "Password set successfully",
-            400: "Passwords do not match",
+            400: "Invalid data or user not found",
+            500: "Internal Server Error",
         },
     )
     def post(self, request):
-        password = request.data.get('password')
-        confirm_password = request.data.get('confirm_password')
-        if password == confirm_password:
-            email = request.session.get('email')
-            user = User.objects.create_user(email, email, password)
-            UserProfile.objects.create(user=user)
-            return Response({'message': 'Password set successfully'}, status=status.HTTP_200_OK)
-        else:
-            return Response({'error': 'Passwords do not match'}, status=status.HTTP_400_BAD_REQUEST)
+        logger.info("Starting SetPasswordAPIView post method")
+        serializer = SetPasswordSerializer(data=request.data)
+        if serializer.is_valid():
+            password = serializer.validated_data['password']
+            confirm_password = serializer.validated_data['confirm_password']
+            email = serializer.validated_data.get('email')  # Get email from request data
+            if password != confirm_password:
+                return Response({
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                    'error': 'Passwords do not match',
+                }, status=status.HTTP_400_BAD_REQUEST)
+            if email:
+                try:
+                    user = User.objects.get(email=email)
+                    user.set_password(password)
+                    user.save()
+                    logger.info(f"Password set successfully for user: {email}")
+                    return Response({
+                        'status_code': status.HTTP_200_OK,
+                        'message': 'Password set successfully',
+                    }, status=status.HTTP_200_OK)
+                except User.DoesNotExist:
+                    logger.warning(f"User with email {email} not found")
+                    return Response({
+                        'status_code': status.HTTP_400_BAD_REQUEST,
+                        'error': 'User not found',
+                    }, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                logger.warning("Email not provided in request")
+                return Response({
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                    'error': 'Email is required',
+                }, status=status.HTTP_400_BAD_REQUEST)
+        logger.error(f"Validation errors: {serializer.errors}")
+        return Response({
+            'status_code': status.HTTP_400_BAD_REQUEST,
+            'errors': serializer.errors,
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class MainAPIView(APIView):
@@ -150,10 +253,106 @@ class MainAPIView(APIView):
 
     @swagger_auto_schema(
         operation_description="Get the main welcome page",
-        responses={200: "Main welcome page"},
+        responses={200: "Main welcome page", 500: "Internal Server Error"},
     )
     def get(self, request):
-        if request.user.is_authenticated:
-            return Response({'message': f'Welcome, {request.user.username}'}, status=status.HTTP_200_OK)
-        else:
-            return render(request, 'accounts/main.html')
+        logger.info("Starting MainAPIView get method")
+        try:
+            if request.user.is_authenticated:
+                logger.info(f"Welcome, {request.user.username}")
+                return Response({
+                    'status_code': status.HTTP_200_OK,
+                    'message': f'Welcome, {request.user.username}',
+                }, status=status.HTTP_200_OK)
+            else:
+                logger.info("Welcome to the main page")
+                return Response({
+                    'status_code': status.HTTP_200_OK,
+                    'message': 'Welcome to the main page',
+                }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Internal Server Error: {e}")
+            return Response({
+                'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR,
+                'error': 'Internal Server Error',
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class SocialLoginAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        provider = request.GET.get("provider")
+        access_token = request.GET.get("access_token")
+
+        if not provider or not access_token:
+            return Response({
+                "status_code": status.HTTP_400_BAD_REQUEST,
+                "error": "Provider and access token are required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            strategy = load_strategy(request)
+            backend = load_backend(strategy, provider, redirect_uri=None)
+            user = backend.do_auth(access_token)
+
+            if user:
+                login(request, user)
+                refresh = RefreshToken.for_user(user)
+                return Response({
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                }, status=status.HTTP_200_OK)
+            else:
+                return Response({
+                    "status_code": status.HTTP_400_BAD_REQUEST,
+                    "error": "Invalid access token or user not found",
+                }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error during social login: {e}")
+            return Response({
+                "status_code": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "error": str(e),
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+class ResendVerificationCodeAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    @swagger_auto_schema(
+        operation_description="Resend verification code to the user's email",
+        request_body=ResendVerificationCodeSerializer,
+        responses={
+            200: "Verification email sent",
+            400: "Invalid email or user not found",
+            500: "Internal Server Error",
+        },
+    )
+    def post(self, request):
+        logger.info("Starting ResendVerificationCodeAPIView post method")
+        serializer = ResendVerificationCodeSerializer(data=request.data)
+        if serializer.is_valid():
+            email = serializer.validated_data['email']
+            try:
+                user_profile = UserProfile.objects.get(user__email=email)
+                confirmation_code = str(random.randint(100000, 999999))  # Generate a 6-digit numeric code
+                user_profile.verification_code = confirmation_code
+                user_profile.save()
+                send_verification_email.delay(email, confirmation_code)
+                logger.info(f"Verification email resent to: {email}")
+                return Response({
+                    'status_code': status.HTTP_200_OK,
+                    'message': 'Verification email sent',
+                }, status=status.HTTP_200_OK)
+            except UserProfile.DoesNotExist:
+                logger.warning(f"User with email {email} not found")
+                return Response({
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                    'error': 'User not found',
+                }, status=status.HTTP_400_BAD_REQUEST)
+        logger.error(f"Validation errors: {serializer.errors}")
+        return Response({
+            'status_code': status.HTTP_400_BAD_REQUEST,
+            'errors': serializer.errors,
+        }, status=status.HTTP_400_BAD_REQUEST)

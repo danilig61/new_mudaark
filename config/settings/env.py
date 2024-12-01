@@ -1,18 +1,19 @@
 from pathlib import Path
 import os
+
 import environ
 
+# Инициализация environ
 env = environ.Env()
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+# Определение базовой директории
+BASE_DIR = Path(__file__).resolve()
 
-if os.getenv('READ_ENV_LOCAL'):
-    if os.path.exists(os.path.join(BASE_DIR, '.env.local')):
-        environ.Env.read_env(os.path.join(BASE_DIR, '.env.local'))
-    else:
-        environ.Env.read_env(os.path.join(BASE_DIR.parent, '.env.local'))
+# Загрузка переменных окружения
+env_file = BASE_DIR / (".env.local" if os.getenv("READ_ENV_LOCAL") else ".env")
+print(f"Загружаем файл окружения: {env_file}")  # Отладочный вывод
+
+if env_file.exists():
+    environ.Env.read_env(str(env_file))
 else:
-    if os.path.exists(os.path.join(BASE_DIR, '.env')):
-        environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
-    else:
-        environ.Env.read_env(os.path.join(BASE_DIR.parent, '.env'))
+    raise FileNotFoundError(f"Файл {env_file} не найден. Убедитесь, что он существует.")
